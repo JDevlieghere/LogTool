@@ -5,10 +5,58 @@ import Text.Parsec
 import Text.Parsec.String
 import Data.Maybe
 
-data Date = Date Int Int Int deriving (Show)
-data Time = Time Int Int Double deriving (Show)
-data File = File Name LineNb Tid deriving (Show)
-data Segment = Segment Date Time Host Code Level File Message deriving (Show)
+displayBlue   = "\x1b[0;34m"
+displayYellow = "\x1b[0;33m"
+displayRed    = "\x1b[0;31m"
+displayReset  = "\x1b[0m"
+
+data Date = Date { dateYear :: Int
+                 , dateMonth :: Int
+                 , dateDay :: Int
+                 }
+
+instance Show Date where
+    show (Date y m d) = show y ++ "/" ++ show m ++ "/" ++ show d
+
+data Time = Time { timeHour :: Int
+                 , timeMinute :: Int
+                 , timeSecond :: Double
+                 }
+
+instance Show Time where
+    show (Time  h m s) = show h ++ ":" ++ show m ++ ":" ++ show s
+
+data File = File { fileName :: Name
+                 , fileLine :: LineNb
+                 , fileTid :: Tid
+                 }
+
+instance Show File where
+    show (File n l t) = "<" ++ n ++ " #" ++ show l ++ " PID" ++ show t ++ ">"
+
+data Segment = Segment { segmentDate :: Date
+                       , segmentTime :: Time
+                       , segmentHost :: Host
+                       , segmentCode :: Code
+                       , segmentLevel :: Level
+                       , segmentFile :: File
+                       , segmentMessage :: Message
+                       }
+
+instance Show Segment where
+    show (Segment d t h c l f m) = show d ++
+                                   " " ++
+                                   show t ++
+                                   " " ++
+                                   h ++
+                                   " " ++
+                                   c ++
+                                   " " ++
+                                   l ++
+                                   " " ++
+                                   show f ++
+                                   " " ++
+                                   m
 
 type Host = String
 type Code = String
@@ -55,8 +103,8 @@ level = do
     h <- many1 upper
     return h
 
-fileName :: Parser Name
-fileName = do
+fName :: Parser Name
+fName = do
     n <- many1 (char '.'  <|> alphaNum)
     return n
 
@@ -74,7 +122,7 @@ tid = do
 file :: Parser File
 file = do
     char '<'
-    n <- fileName
+    n <- fName
     char '#'
     l <- lineNumber
     spaces
@@ -114,10 +162,21 @@ parseSegment input = case result of
 parseSegments :: [String] -> [Segment]
 parseSegments = mapMaybe parseSegment
 
+filterFile :: [Segment] -> String -> [Segment]
+filterFile segments file = filter hasName segments
+    where hasName (Segment _ _ _ _ _ (File f _ _) _) = f == file
+
+colorize :: Segment -> Segment
+colorize s@(Segment d t h c l f m) = case l of
+    "INFO" -> Segment d t h c l f (displayBlue ++ m ++ displayReset)
+    "WARN" -> Segment d t h c l f (displayYellow ++ m ++ displayReset)
+    "ERROR" -> Segment d t h c l f (displayRed ++ m ++ displayReset)
+    _ -> s
+
 main :: IO ()
 main = do
-    (file:_) <- getArgs
+    (file:filter:_) <- getArgs
     content <- readFile file
     let segments = parseSegments $ lines content
-    mapM_ print segments
+    mapM_ print $ map colorize segments
 
