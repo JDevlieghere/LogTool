@@ -1,3 +1,5 @@
+import System.IO.UTF8
+import Prelude hiding (readFile, writeFile)
 import Control.Applicative hiding ((<|>))
 import System.Environment
 import System.IO
@@ -175,7 +177,7 @@ colorize s@(Segment d t h c l f m) = case l of
 
 main :: IO ()
 main = do
-    (file:filter:_) <- getArgs
+    (file:_) <- getArgs
     content <- readFile file
     let segments = parseSegments $ lines content
     mapM_ print $ map colorize segments
