@@ -1,147 +1,111 @@
-import System.IO.UTF8
-import Prelude hiding (readFile, writeFile)
+import Data.Time
 import Control.Applicative hiding ((<|>))
+import Data.Text.Encoding
 import System.Environment
 import System.IO
-import Text.Parsec
-import Text.Parsec.String
 import Data.Maybe
+import Text.Parsec
+import Text.Parsec.ByteString
+import Text.Parsec.Error
+import qualified Text.Parsec as P
+import Data.ByteString (ByteString)
+import qualified Data.ByteString.Char8 as B
 
 displayBlue   = "\x1b[0;34m"
 displayYellow = "\x1b[0;33m"
 displayRed    = "\x1b[0;31m"
 displayReset  = "\x1b[0m"
 
-data Date = Date { dateYear :: Int
-                 , dateMonth :: Int
-                 , dateDay :: Int
-                 }
-
-instance Show Date where
-    show (Date y m d) = show y ++ "/" ++ show m ++ "/" ++ show d
-
-data Time = Time { timeHour :: Int
-                 , timeMinute :: Int
-                 , timeSecond :: Double
-                 }
-
-instance Show Time where
-    show (Time  h m s) = show h ++ ":" ++ show m ++ ":" ++ show s
-
-data File = File { fileName :: Name
-                 , fileLine :: LineNb
-                 , fileTid :: Tid
-                 }
-
-instance Show File where
-    show (File n l t) = "<" ++ n ++ " #" ++ show l ++ " PID" ++ show t ++ ">"
-
-data Segment = Segment { segmentDate :: Date
-                       , segmentTime :: Time
-                       , segmentHost :: Host
-                       , segmentCode :: Code
-                       , segmentLevel :: Level
-                       , segmentFile :: File
-                       , segmentMessage :: Message
-                       }
-
-instance Show Segment where
-    show (Segment d t h c l f m) = show d ++
-                                   " " ++
-                                   show t ++
-                                   " " ++
-                                   h ++
-                                   " " ++
-                                   c ++
-                                   " " ++
-                                   l ++
-                                   " " ++
-                                   show f ++
-                                   " " ++
-                                   m
-
-type Host = String
-type Code = String
-type Level = String
-type Name = String
+type Host = ByteString
+type Code = ByteString
+type Level = ByteString
+type Name = ByteString
 type LineNb = Int
 type Tid = Int
-type Message = String
+type LogMessage = ByteString
 
-dateSep = char '/'
+data File = File Name LineNb Tid deriving (Show)
+data Segment = Structured UTCTime Host Code Level File LogMessage | Free LogMessage deriving (Show)
 
-date :: Parser Date
-date = do
-    y <- many1 digit
+
+dateSep = P.char '/'
+timeSep = P.char ':'
+
+day :: Parser Day
+day = do
+    y <- P.many1 P.digit
     dateSep
-    m <- many1 digit
+    m <- P.many1 P.digit
     dateSep
-    d <- many1 digit
-    return $ Date  (read y) (read m) (read d)
+    d <- P.many1 P.digit
+    return $ fromGregorian  (read y) (read m) (read d)
 
-timeSep = char ':'
 
-time :: Parser Time
+time :: Parser TimeOfDay
 time = do
-    h <- many1 digit
+    h <- P.many1 P.digit
     timeSep
-    m <- many1 digit
+    m <- P.many1 P.digit
     timeSep
-    s <- many1 (char '.' <|> digit)
-    return $ Time (read h) (read m) (read s)
+    s <- P.many1 (P.char '.' <|> P.digit)
+    return $ TimeOfDay (read h) (read m) (read s)
+
+date :: Parser UTCTime
+date = do
+    d <- day
+    spaces
+    t <- time
+    return $ UTCTime d (timeOfDayToTime t)
 
 host :: Parser Host
 host = do
-    h <- many1 alphaNum
-    return h
+    h <- P.many1 P.alphaNum
+    return $ B.pack h
 
 code :: Parser Code
 code = do
-    c <- many1 upper
-    return c
+    c <- P.many1 P.upper
+    return $ B.pack c
 
 level :: Parser Level
 level = do
-    h <- many1 upper
-    return h
+    h <- P.many1 P.upper
+    return $ B.pack h
 
 fName :: Parser Name
 fName = do
-    n <- many1 (char '.'  <|> alphaNum)
-    return n
+    n <- manyTill anyChar (char '#')
+    return $ B.pack n
 
 lineNumber :: Parser LineNb
 lineNumber = do
-    l <- many1 digit
+    l <- P.many1 P.digit
     return $ read l
 
 tid :: Parser Tid
 tid = do
-    string "TID#"
-    t <- many1 digit
+    P.string "TID#"
+    t <- P.many1 P.digit
     return $ read t
 
 file :: Parser File
 file = do
-    char '<'
+    P.char '<'
     n <- fName
-    char '#'
     l <- lineNumber
     spaces
     t <- tid
-    char '>'
+    P.char '>'
     return $ File n l t
 
-message :: Parser Message
+message :: Parser LogMessage
 message = do
-    m <- many1 anyChar
-    return m
+    m <- P.many1 P.anyChar
+    return $ B.pack m
 
-segment :: Parser Segment
-segment = do
+structuredSegment :: Parser Segment
+structuredSegment = do
     d <- date
-    spaces
-    t <- time
     spaces
     h <- host
     spaces
@@ -152,33 +116,30 @@ segment = do
     f <- file
     spaces
     m <- message
-    return $ Segment d t h c l f m
+    return $ Structured d h c l f m
 
+freeSegment :: Parser Segment
+freeSegment = do
+    m <- message
+    return $ Free m
 
-parseSegment :: String -> Maybe Segment
-parseSegment input = case result of
+segment :: Parser Segment
+segment = do
+    s <- try structuredSegment <|> freeSegment
+    return s
+
+line :: B.ByteString -> Maybe Segment
+line input = case result of
     Left _        -> Nothing
     Right segment -> Just segment
     where result = parse segment  "Segment Parser" input
 
-parseSegments :: [String] -> [Segment]
-parseSegments = mapMaybe parseSegment
-
-filterFile :: [Segment] -> String -> [Segment]
-filterFile segments file = filter hasName segments
-    where hasName (Segment _ _ _ _ _ (File f _ _) _) = f == file
-
-colorize :: Segment -> Segment
-colorize s@(Segment d t h c l f m) = case l of
-    "INFO" -> Segment d t h c l f (displayBlue ++ m ++ displayReset)
-    "WARN" -> Segment d t h c l f (displayYellow ++ m ++ displayReset)
-    "ERROR" -> Segment d t h c l f (displayRed ++ m ++ displayReset)
-    _ -> s
+parseLines :: [B.ByteString] -> [Segment]
+parseLines = mapMaybe line
 
 main :: IO ()
 main = do
     (file:_) <- getArgs
-    content <- readFile file
-    let segments = parseSegments $ lines content
-    mapM_ print $ map colorize segments
-
+    content <- B.readFile file
+    let segments = parseLines $ B.lines content
+    mapM_ print segments
